@@ -517,10 +517,7 @@ ha_message_handler(int fd, __attribute__((__unused__)) void *data)
 		return;
 	}
 
-	if (ret != (int)(msg->hdr.size + sizeof(msg->hdr))) {
-		log_error("Failed to recv complete msg");
-		return;
-	}
+	//TO-DO: add check of recv count?
 
 	ret = ha_message_handlers[msg->hdr.type](msg);
 	switch (ret) {
@@ -529,7 +526,7 @@ ha_message_handler(int fd, __attribute__((__unused__)) void *data)
 		return;
 	case HA_MSG_HDLR_REPLY:
 		ret = virtio_ha_send_msg(fd, msg);
-		if (ret != (int)(msg->hdr.size + sizeof(msg->hdr))) {
+		if (ret != (int)(msg->hdr.size + sizeof(msg->hdr))) {//TO-DO: change check, also clean-up ret value of send/recv
 			if (ret < 0)
 				log_error("Failed to send ha msg");
 			else
