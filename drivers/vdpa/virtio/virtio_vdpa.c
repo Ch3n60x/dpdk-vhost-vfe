@@ -14,7 +14,7 @@
 #include <virtio_api.h>
 #include <virtio_lm.h>
 #include <virtio_util.h>
-#include <virtio_ha.h>
+
 #include "rte_vf_rpc.h"
 #include "virtio_vdpa.h"
 
@@ -749,6 +749,14 @@ virtio_vdpa_dev_cleanup(int vid)
 		priv->vrings[i]->conf_enable = false;
 	}
 
+	ret = virtio_ha_vf_vhost_fd_remove(&priv->vf_name, &priv->pf_name);
+	if (ret < 0)
+		DRV_LOG(ERR, "Failed to remove vhost fd: %s", vdev->device->name);
+
+	ret = virtio_ha_vf_mem_tbl_remove(&priv->vf_name, &priv->pf_name);
+	if (ret < 0)
+		DRV_LOG(ERR, "Failed to remove mem table: %s", vdev->device->name);
+
 	iommu_domain = priv->iommu_domain;
 	pthread_mutex_lock(&iommu_domain->domain_lock);
 	if (priv->mem_tbl_set) {
@@ -813,6 +821,28 @@ virtio_vdpa_find_mem_in_iommu_domain(const struct rte_vhost_mem_region *key,
 	}
 
 	return -1;
+}
+
+static void
+virtio_vdpa_dev_store_mem_tbl(struct virtio_vdpa_priv *priv)
+{
+	struct virtio_vdpa_iommu_domain *iommu_domain = priv->iommu_domain;
+	struct virtio_vdpa_dma_mem *mem;
+	uint32_t i;
+
+	mem = malloc(sizeof(struct virtio_vdpa_dma_mem) +
+		iommu_domain->mem.nregions * sizeof(struct virtio_vdpa_mem_region));
+	mem->nregions = iommu_domain->mem.nregions;
+	for (i = 0; i < iommu_domain->mem.nregions; i++) {
+		mem->regions[i].guest_phys_addr = iommu_domain->mem.regions[i].guest_phys_addr;
+		mem->regions[i].host_phys_addr = iommu_domain->mem.regions[i].host_phys_addr;
+		mem->regions[i].size = iommu_domain->mem.regions[i].size;
+	}
+	/* Don't store memory table before virtio_ha_vf_devargs_fds_store() call */
+	if (priv->ctx_restored && virtio_ha_vf_mem_tbl_store(&priv->vf_name, &priv->pf_name, mem))
+		DRV_LOG(ERR, "%s failed to store memory table", priv->vdev->device->name);
+
+	free(mem);
 }
 
 static int
@@ -935,6 +965,8 @@ virtio_vdpa_dev_set_mem_table(int vid)
 		priv->mem_tbl_set = true;
 		iommu_domain->mem_tbl_ref_cnt++;
 	}
+
+	virtio_vdpa_dev_store_mem_tbl(priv);
 
 err:
 	pthread_mutex_unlock(&iommu_domain->domain_lock);
@@ -1243,9 +1275,10 @@ virtio_vdpa_dev_config(int vid)
 		virtio_vdpa_find_priv_resource_by_vdev(vdev);
 	uint16_t last_avail_idx, last_used_idx, nr_virtqs;
 	struct virtio_vdpa_notifier_work *notify_work;
+	struct vdpa_vf_with_devargs vf_dev;
 	uint64_t t_start = rte_rdtsc_precise();
 	uint64_t t_end;
-	int ret, i;
+	int ret, i, vhost_sock_fd;
 
 	if (priv == NULL) {
 		DRV_LOG(ERR, "Invalid vDPA device: %s", vdev->device->name);
@@ -1357,6 +1390,41 @@ virtio_vdpa_dev_config(int vid)
 	t_end  = rte_rdtsc_precise();
 	DRV_LOG(INFO, "%s vid %d was configured, took %lu us.", vdev->device->name,
 			vid, (t_end - t_start) * 1000000 / rte_get_tsc_hz());
+
+	if (!priv->ctx_restored) {
+		strcpy(vf_dev.vf_name.dev_bdf, priv->vf_name.dev_bdf);
+		rte_uuid_unparse(priv->vm_uuid, vf_dev.vm_uuid, RTE_UUID_STRLEN);
+
+		ret = rte_vhost_get_ifname(vid, vf_dev.vhost_sock_addr, VDPA_MAX_SOCK_LEN);
+		if (ret) {
+			DRV_LOG(ERR, "Failed to get vhost sock addr (vid %d)", vid);
+			return 0;
+		}
+
+		ret = virtio_ha_vf_devargs_fds_store(&vf_dev, &priv->pf_name, priv->vfio_container_fd,
+			priv->vfio_group_fd, priv->vfio_dev_fd);
+		if (ret) {
+			DRV_LOG(ERR, "Failed to store vf devargs and vfio fds (vid %d)", vid);
+			return 0;
+		}
+
+		vhost_sock_fd = rte_vhost_get_conn_fd(vid);
+		if (vhost_sock_fd < 0) {
+			DRV_LOG(ERR, "Failed to get vhost sock fd (vid %d)", vid);
+			return 0;
+		}
+
+		ret = virtio_ha_vf_vhost_fd_store(&vf_dev.vf_name, &priv->pf_name, vhost_sock_fd);
+		if (ret) {
+			DRV_LOG(ERR, "Failed to store vhost fd (vid %d)", vid);
+			return 0;			
+		}
+
+		priv->ctx_restored = true;
+
+		if (priv->mem_tbl_set)
+			virtio_vdpa_dev_store_mem_tbl(priv);
+	}
 
 	return 0;
 }
@@ -1692,7 +1760,7 @@ static int
 virtio_vdpa_dev_do_remove(struct rte_pci_device *pci_dev, struct virtio_vdpa_priv *priv)
 {
 	struct virtio_vdpa_iommu_domain *iommu_domain = priv->iommu_domain;
-	bool ret;
+	int ret;
 
 	if (!priv)
 		return 0;
@@ -1758,6 +1826,7 @@ virtio_vdpa_dev_do_remove(struct rte_pci_device *pci_dev, struct virtio_vdpa_pri
 		virtio_pci_dev_free(priv->vpdev);
 	}
 
+	//TO-DO: what if vdpa service crash-start but qemu does not connect, then rpc remove?
 	pthread_mutex_lock(&iommu_domain->domain_lock);
 	iommu_domain->container_ref_cnt--;
 	if (iommu_domain->container_ref_cnt == 0) {
@@ -1780,6 +1849,10 @@ virtio_vdpa_dev_do_remove(struct rte_pci_device *pci_dev, struct virtio_vdpa_pri
 	if (priv->vdpa_dp_map)
 		rte_memzone_free(priv->vdpa_dp_map);
 	rte_free(priv);
+
+	ret = virtio_ha_vf_devargs_fds_remove(&priv->vf_name, &priv->pf_name);
+	if (ret < 0)
+		DRV_LOG(ERR, "Failed to remove vf devargs and fds: %s", priv->vdev->device->name);
 
 	return 0;
 }
@@ -1814,10 +1887,12 @@ virtio_vdpa_dev_probe(struct rte_pci_driver *pci_drv __rte_unused,
 	int ret, fd, vf_id = 0, state_len;
 	struct virtio_vdpa_priv *priv;
 	struct virtio_vdpa_iommu_domain *iommu_domain;
+	const struct virtio_vdpa_dma_mem *mem;
 	char devname[RTE_DEV_NAME_MAX_LEN] = {0};
 	char pfname[RTE_DEV_NAME_MAX_LEN] = {0};
 	char mz_name[RTE_MEMZONE_NAMESIZE];
-	int iommu_group_num;
+	int iommu_group_num, container_fd = -1, group_fd = -1, device_fd = -1;
+	uint32_t i;
 	size_t mz_len;
 	int retries = VIRTIO_VDPA_GET_GROUPE_RETRIES;
 
@@ -1841,6 +1916,7 @@ virtio_vdpa_dev_probe(struct rte_pci_driver *pci_drv __rte_unused,
 		return -rte_errno;
 	}
 
+	strcpy(priv->vf_name.dev_bdf, devname);
 	priv->pdev = pci_dev;
 
 	ret = virtio_vdpa_get_pf_name(devname, pfname, sizeof(pfname));
@@ -1857,6 +1933,8 @@ virtio_vdpa_dev_probe(struct rte_pci_driver *pci_drv __rte_unused,
 		rte_errno = VFE_VDPA_ERR_NO_PF_DEVICE;
 		goto error;
 	}
+
+	strcpy(priv->pf_name.dev_bdf, pfname);
 
 	ret = virtio_vdpa_get_vfid(pfname, devname, &vf_id);
 	if (ret) {
@@ -1894,43 +1972,94 @@ virtio_vdpa_dev_probe(struct rte_pci_driver *pci_drv __rte_unused,
 
 	priv->iommu_domain = iommu_domain;
 
+	if (!strcmp(cached_ctx.vf_name.dev_bdf, devname)) {
+		container_fd = cached_ctx.ctx->vfio_container_fd;
+		group_fd = cached_ctx.ctx->vfio_group_fd;
+		device_fd = cached_ctx.ctx->vfio_device_fd;
+		/* When devices in same iommu_domain restore, only the first device
+		 * needs to restore memory table. It's assumed that those devices'
+		 * memory table is the same.
+		 */
+		if (iommu_domain->vfio_container_fd == -1) {
+			mem = &cached_ctx.ctx->mem;
+			for (i = 0; i < mem->nregions; i++) {
+				iommu_domain->mem.regions[i].guest_phys_addr = mem->regions[i].guest_phys_addr;
+				iommu_domain->mem.regions[i].host_phys_addr = mem->regions[i].host_phys_addr;
+				iommu_domain->mem.regions[i].size = mem->regions[i].size;
+			}
+			iommu_domain->mem.nregions = mem->nregions;
+		}
+		priv->mem_tbl_set = true;
+		iommu_domain->mem_tbl_ref_cnt++;
+	}
+
 	if (iommu_domain->vfio_container_fd == -1) {
-		iommu_domain->vfio_container_fd = rte_vfio_container_create();
-		if (iommu_domain->vfio_container_fd < 0) {
-			DRV_LOG(ERR, "%s failed to get container fd", devname);
-			rte_errno = VFE_VDPA_ERR_ADD_VF_CREATE_VFIO_CONTAINER;
-			goto error;
+		if (container_fd != -1) {
+			iommu_domain->vfio_container_fd = container_fd;
+			ret = rte_vfio_container_set(container_fd);
+			if (ret < 0) {
+				DRV_LOG(ERR, "%s failed to set container fd", devname);
+				rte_errno = VFE_VDPA_ERR_ADD_VF_CREATE_VFIO_CONTAINER;
+				goto error;	
+			}		
+		} else {
+			iommu_domain->vfio_container_fd = rte_vfio_container_create();
+			if (iommu_domain->vfio_container_fd < 0) {
+				DRV_LOG(ERR, "%s failed to get container fd", devname);
+				rte_errno = VFE_VDPA_ERR_ADD_VF_CREATE_VFIO_CONTAINER;
+				goto error;
+			}
 		}
 	}
 	iommu_domain->container_ref_cnt++;
 	priv->vfio_container_fd = iommu_domain->vfio_container_fd;
 
-	do {
-		ret = rte_vfio_get_group_num(rte_pci_get_sysfs_path(), devname,
-				&iommu_group_num);
-		if (ret <= 0) {
-			DRV_LOG(ERR, "%s failed to get IOMMU group ret:%d", devname, ret);
-			rte_errno = VFE_VDPA_ERR_ADD_VF_GET_IOMMU_GROUP;
-			goto error;
-		}
+	ret = rte_vfio_get_group_num(rte_pci_get_sysfs_path(), devname,
+			&iommu_group_num);
+	if (ret <= 0) {
+		DRV_LOG(ERR, "%s failed to get IOMMU group ret:%d", devname, ret);
+		rte_errno = VFE_VDPA_ERR_ADD_VF_GET_IOMMU_GROUP;
+		goto error;
+	}
 
-		DRV_LOG(INFO, "%s iommu_group_num:%d retries:%d", devname, iommu_group_num, retries);
+	if (group_fd == -1) {
+		do {
+			DRV_LOG(INFO, "%s iommu_group_num:%d retries:%d", devname, iommu_group_num, retries);
 
-		priv->vfio_group_fd = rte_vfio_container_group_bind(
-				priv->vfio_container_fd, iommu_group_num);
-		if (priv->vfio_group_fd < 0) {
-			DRV_LOG(ERR, "%s failed to get group fd", devname);
-			sleep(1);
-			retries--;
-		} else
-			break;
-		if (!retries) {
-			rte_errno = VFE_VDPA_ERR_ADD_VF_VFIO_CONTAINER_GROUP_BIND;
-			goto error;
-		}
-	} while(retries);
+			priv->vfio_group_fd = rte_vfio_container_group_bind(
+					priv->vfio_container_fd, iommu_group_num);
+			if (priv->vfio_group_fd < 0) {
+				DRV_LOG(ERR, "%s failed to get group fd", devname);
+				sleep(1);
+				retries--;
+			} else
+				break;
+			if (!retries) {
+				rte_errno = VFE_VDPA_ERR_ADD_VF_VFIO_CONTAINER_GROUP_BIND;
+				goto error;
+			}
+		} while(retries);
+	} else {
+		do {
+			DRV_LOG(INFO, "%s iommu_group_num:%d retries:%d", devname, iommu_group_num, retries);
 
-	priv->vpdev = virtio_pci_dev_alloc(pci_dev, -1);
+			ret = rte_vfio_container_group_set_bind(priv->vfio_container_fd,
+				iommu_group_num, group_fd);
+			if (ret < 0) {
+				DRV_LOG(ERR, "%s failed to set and bind group fd", devname);
+				sleep(1);
+				retries--;
+			} else
+				break;
+			if (!retries) {
+				rte_errno = VFE_VDPA_ERR_ADD_VF_VFIO_CONTAINER_GROUP_BIND;
+				goto error;
+			}
+		} while(retries);
+		priv->vfio_group_fd = group_fd;		
+	}
+
+	priv->vpdev = virtio_pci_dev_alloc(pci_dev, device_fd);
 	if (priv->vpdev == NULL) {
 		DRV_LOG(ERR, "%s failed to alloc virito pci dev", devname);
 		rte_errno = rte_errno ? rte_errno : VFE_VDPA_ERR_ADD_VF_ALLOC;
