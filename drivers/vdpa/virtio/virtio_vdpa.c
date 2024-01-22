@@ -3,6 +3,8 @@
  */
 #include <unistd.h>
 #include <net/if.h>
+#include <sys/ioctl.h>
+#include <linux/vfio.h>
 #include <rte_malloc.h>
 #include <rte_vfio.h>
 #include <rte_vhost.h>
@@ -1564,6 +1566,48 @@ virtio_vdpa_dev_presetup_done(int vid)
 	return 0;
 }
 
+static void
+virtio_vdpa_vfio_dma_unmap(struct virtio_vdpa_iommu_domain *iommu_domain)
+{
+	struct virtio_vdpa_vf_drv_mem *mem = &iommu_domain->mem;
+	struct vfio_iommu_type1_dma_unmap dma_unmap = {};
+	uint32_t i;
+	int ret;
+
+	dma_unmap.argsz = sizeof(struct vfio_iommu_type1_dma_unmap);
+	for (i = 0; i < mem->nregions; i++) {
+		dma_unmap.size = mem->regions[i].size;
+		dma_unmap.iova = mem->regions[i].guest_phys_addr;
+		ret = ioctl(iommu_domain->vfio_container_fd, VFIO_IOMMU_UNMAP_DMA,
+				&dma_unmap);
+		if (ret) {
+			DRV_LOG(ERR, "Cannot clear DMA remapping");
+		} else if (dma_unmap.size != mem->regions[i].size) {
+			DRV_LOG(ERR, "Unexpected size %"PRIu64
+				" of DMA remapping cleared instead of %"PRIu64,
+				(uint64_t)dma_unmap.size, mem->regions[i].size);
+		}
+	}
+}
+
+static void
+virtio_vdpa_dev_mem_tbl_cleanup(struct rte_vdpa_device *vdev)
+{
+	struct virtio_vdpa_priv *priv =
+		virtio_vdpa_find_priv_resource_by_vdev(vdev);
+	int ret;
+
+	ret = virtio_ha_vf_mem_tbl_remove(&priv->vf_name, &priv->pf_name);
+	if (ret < 0)
+		DRV_LOG(ERR, "Failed to remove mem table: %s", vdev->device->name);
+
+	/* Don't call rte_vfio_container_dma_unmap() because at this time, DPDK EAL
+	 * layer does not have the DMA mapping information (the corresponding HVA does
+	 * not exist)
+	 */
+	virtio_vdpa_vfio_dma_unmap(priv->iommu_domain);
+}
+
 static struct rte_vdpa_dev_ops virtio_vdpa_ops = {
 	.get_queue_num = virtio_vdpa_vqs_max_get,
 	.get_features = virtio_vdpa_features_get,
@@ -1583,6 +1627,7 @@ static struct rte_vdpa_dev_ops virtio_vdpa_ops = {
 	.set_mem_table = virtio_vdpa_dev_set_mem_table,
 	.dev_cleanup = virtio_vdpa_dev_cleanup,
 	.presetup_done = virtio_vdpa_dev_presetup_done,
+	.mem_tbl_cleanup = virtio_vdpa_dev_mem_tbl_cleanup,
 };
 
 static int vdpa_check_handler(__rte_unused const char *key,
