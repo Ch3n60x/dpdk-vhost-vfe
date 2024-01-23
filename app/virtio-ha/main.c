@@ -14,8 +14,6 @@
 
 #include <virtio_ha.h>
 
-#define VIRTIO_HA_MAX_MEM_REGIONS 8
-
 #define log_error(M, ...) \
 	syslog(LOG_ERR, "[VIRTIO HA ERR] %s:%d:%s: " M "\n", \
 	       __FILE__, __LINE__, __func__, ##__VA_ARGS__)
