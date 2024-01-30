@@ -63,6 +63,9 @@ static int vfio_noiommu_dma_mem_map(int, uint64_t, uint64_t, uint64_t, int);
 static int vfio_dma_mem_map(struct vfio_config *vfio_cfg, uint64_t vaddr,
 		uint64_t iova, uint64_t len, int do_map);
 
+static dma_map_store dma_store;
+static container_fd_store cfd_store;
+
 /* IOMMU types we support */
 static const struct vfio_iommu_type iommu_types[] = {
 	/* x86 IOMMU, otherwise known as type 1 */
@@ -1103,6 +1106,84 @@ rte_vfio_setup_device_with_dev_fd(const char *sysfs_base, const char *dev_addr,
 	vfio_container_fd = vfio_cfg->vfio_container_fd;
 	user_mem_maps = &vfio_cfg->mem_maps;
 
+	if (internal_conf->process_type == RTE_PROC_PRIMARY &&
+			vfio_cfg->vfio_active_groups == 1 &&
+			vfio_group_device_count(vfio_group_fd) == 0 &&
+			vfio_cfg == default_vfio_cfg) {
+		const struct vfio_iommu_type *t = &iommu_types[0];
+
+		/* lock memory hotplug before mapping and release it
+		* after registering callback, to prevent races
+		*/
+		rte_mcfg_mem_read_lock();
+		if (vfio_cfg == default_vfio_cfg)
+			ret = t->dma_map_func(vfio_container_fd);
+		else
+			ret = 0;
+		if (ret) {
+			RTE_LOG(ERR, EAL,
+				"%s DMA remapping failed, error "
+				"%i (%s)\n",
+				dev_addr, errno, strerror(errno));
+			close(vfio_group_fd);
+			rte_vfio_clear_group(vfio_group_fd);
+			rte_mcfg_mem_read_unlock();
+			return -1;
+		}
+
+		vfio_cfg->vfio_iommu_type = t;
+
+		/* re-map all user-mapped segments */
+		rte_spinlock_recursive_lock(&user_mem_maps->lock);
+
+		/* this IOMMU type may not support DMA mapping, but
+		* if we have mappings in the list - that means we have
+		* previously mapped something successfully, so we can
+		* be sure that DMA mapping is supported.
+		*/
+		for (i = 0; i < user_mem_maps->n_maps; i++) {
+			struct user_mem_map *map;
+			map = &user_mem_maps->maps[i];
+
+			ret = t->dma_user_map_func(
+					vfio_container_fd,
+					map->addr, map->iova, map->len,
+					1);
+			if (ret) {
+				RTE_LOG(ERR, EAL, "Couldn't map user memory for DMA: "
+						"va: 0x%" PRIx64 " "
+						"iova: 0x%" PRIx64 " "
+						"len: 0x%" PRIu64 "\n",
+						map->addr, map->iova,
+						map->len);
+				rte_spinlock_recursive_unlock(
+						&user_mem_maps->lock);
+				rte_mcfg_mem_read_unlock();
+				return -1;
+			}
+		}
+		rte_spinlock_recursive_unlock(&user_mem_maps->lock);
+
+		/* register callback for mem events */
+		if (vfio_cfg == default_vfio_cfg)
+			ret = rte_mem_event_callback_register(
+				VFIO_MEM_EVENT_CLB_NAME,
+				vfio_mem_event_callback, NULL);
+		else
+			ret = 0;
+		/* unlock memory hotplug */
+		rte_mcfg_mem_read_unlock();
+
+		if (ret && rte_errno != ENOTSUP) {
+			RTE_LOG(ERR, EAL, "Could not install memory event callback for VFIO\n");
+			return -1;
+		}
+		if (ret)
+			RTE_LOG(DEBUG, EAL, "Memory event callbacks not supported\n");
+		else
+			RTE_LOG(DEBUG, EAL, "Installed memory event callback for VFIO\n");
+	}
+#if 0
 	/* check if group does not have a container yet */
 	if (!(group_status.flags & VFIO_GROUP_FLAGS_CONTAINER_SET)) {
 
@@ -1233,7 +1314,7 @@ rte_vfio_setup_device_with_dev_fd(const char *sysfs_base, const char *dev_addr,
 		RTE_LOG(INFO, EAL, "Using IOMMU type %d (%s)\n",
 				t->type_id, t->name);
 	}
-
+#endif
 	/* test and setup the device */
 	ret = ioctl(*vfio_dev_fd, VFIO_DEVICE_GET_INFO, device_info);
 	if (ret) {
@@ -1350,7 +1431,8 @@ rte_vfio_enable(const char *modname)
 	rte_spinlock_recursive_t lock = RTE_SPINLOCK_RECURSIVE_INITIALIZER;
 
 	for (i = 0; i < VFIO_MAX_CONTAINERS; i++) {
-		vfio_cfgs[i].vfio_container_fd = -1;
+		if (i > 0)
+			vfio_cfgs[i].vfio_container_fd = -1;
 		vfio_cfgs[i].vfio_active_groups = 0;
 		vfio_cfgs[i].vfio_iommu_type = NULL;
 		vfio_cfgs[i].mem_maps.lock = lock;
@@ -1381,9 +1463,15 @@ rte_vfio_enable(const char *modname)
 	}
 
 	if (internal_conf->process_type == RTE_PROC_PRIMARY) {
-		/* open a new container */
-		default_vfio_cfg->vfio_container_fd =
+		if (default_vfio_cfg->vfio_container_fd > 0) {
+			RTE_LOG(INFO, EAL, "Using stored default container fd %d\n",
+				default_vfio_cfg->vfio_container_fd);
+		} else {
+			/* open a new container */
+			default_vfio_cfg->vfio_container_fd =
 				rte_vfio_get_container_fd();
+			cfd_store(default_vfio_cfg->vfio_container_fd);
+		}
 	} else {
 		/* get the default container from the primary process */
 		default_vfio_cfg->vfio_container_fd =
@@ -1711,6 +1799,9 @@ vfio_type1_dma_mem_map(int vfio_container_fd, uint64_t vaddr, uint64_t iova,
 				return -1;
 			}
 		}
+
+		printf("DMA MAP STORE: iova(0x%lx), len(0x%lx)\n", iova, len);
+		dma_store(iova, len, true);
 	} else {
 		memset(&dma_unmap, 0, sizeof(dma_unmap));
 		dma_unmap.argsz = sizeof(struct vfio_iommu_type1_dma_unmap);
@@ -1730,6 +1821,9 @@ vfio_type1_dma_mem_map(int vfio_container_fd, uint64_t vaddr, uint64_t iova,
 			rte_errno = EIO;
 			return -1;
 		}
+
+		printf("DMA MAP REMOVE: iova(0x%lx), len(0x%lx)\n", iova, len);
+		dma_store(iova, len, false);
 	}
 
 	return 0;
@@ -2514,4 +2608,17 @@ rte_vfio_container_dma_unmap(int container_fd, uint64_t vaddr, uint64_t iova,
 	}
 
 	return container_dma_unmap(vfio_cfg, vaddr, iova, len);
+}
+
+void
+rte_vfio_register_dma_cb(dma_map_store dmap_store, container_fd_store fd_store)
+{
+	dma_store = dmap_store;
+	cfd_store = fd_store;
+}
+
+void
+rte_vfio_restore_default_cfd(int container_fd)
+{
+	default_vfio_cfg->vfio_container_fd = container_fd;
 }
