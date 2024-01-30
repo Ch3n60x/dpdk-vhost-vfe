@@ -174,6 +174,7 @@ DPDK_22 {
 	rte_mcfg_timer_unlock;
 	rte_mem_alloc_validator_register;
 	rte_mem_alloc_validator_unregister;
+	rte_mem_register_fd_cb;
 	rte_mem_check_dma_mask;
 	rte_mem_check_dma_mask_thread_unsafe;
 	rte_mem_event_callback_register;

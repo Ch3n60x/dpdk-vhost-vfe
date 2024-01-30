@@ -766,6 +766,23 @@ virtio_ha_client_cfd_store(int container_fd)
 	return;
 }
 
+static void
+virtio_ha_client_mem_fd_store(size_t sz, int flags, int fd, uint64_t off)
+{
+	struct virtio_ha_global_mem_info info;
+	int ret;
+
+	info.sz = sz;
+	info.flags = flags;
+	info.off = off;
+
+	ret = virtio_ha_global_mem_fd_store(&info, fd);
+	if (ret < 0)
+		RTE_LOG(ERR, VDPA, "Failed to store mem fd\n");
+
+	return;
+}
+
 static int
 virtio_ha_client_start(void)
 {
@@ -777,6 +794,7 @@ virtio_ha_client_start(void)
 		return -1;		
 	}
 
+	rte_mem_register_fd_cb(virtio_ha_client_mem_fd_store);
 	rte_vfio_register_dma_cb(virtio_ha_client_dma_map, virtio_ha_client_cfd_store);
 
 	ret = virtio_ha_global_cfd_query(&vfio_container_fd);

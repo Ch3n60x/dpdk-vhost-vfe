@@ -96,4 +96,7 @@ eal_memalloc_init(void);
 int
 eal_memalloc_cleanup(void);
 
+void
+eal_memalloc_register_fd_cb(mfd_cb cb);
+
 #endif /* EAL_MEMALLOC_H */

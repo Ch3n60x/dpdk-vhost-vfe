@@ -115,6 +115,7 @@ static int huge_wrap_sigsetjmp(void)
 
 static struct sigaction huge_action_old;
 static int huge_need_recover;
+static mfd_cb mem_fd_cb;
 
 static void
 huge_register_sigbus(void)
@@ -622,6 +623,8 @@ alloc_seg(struct rte_memseg *ms, void *addr, int socket_id,
 		munmap(va, alloc_sz);
 		goto resized;
 	}
+
+	mem_fd_cb(alloc_sz, mmap_flags, fd, map_offset);
 
 	/* In linux, hugetlb limitations, like cgroup, are
 	 * enforced at fault time instead of mmap(), even
@@ -1781,4 +1784,10 @@ eal_memalloc_init(void)
 	if (rte_memseg_list_walk(fd_list_create_walk, NULL))
 		return -1;
 	return 0;
+}
+
+void
+eal_memalloc_register_fd_cb(mfd_cb cb)
+{
+	mem_fd_cb = cb;
 }

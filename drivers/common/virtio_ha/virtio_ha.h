@@ -38,7 +38,8 @@ enum virtio_ha_msg_type {
 	VIRTIO_HA_GLOBAL_QUERY_CONTAINER = 13,
 	VIRTIO_HA_GLOBAL_STORE_DMA_MAP = 14,
 	VIRTIO_HA_GLOBAL_REMOVE_DMA_MAP = 15,
-	VIRTIO_HA_MESSAGE_MAX = 16,
+	VIRTIO_HA_GLOBAL_STORE_MEM_FD = 16,
+	VIRTIO_HA_MESSAGE_MAX = 17,
 };
 
 struct virtio_ha_msg_hdr {
@@ -73,6 +74,12 @@ struct virtio_ha_global_dma_entry {
 };
 
 TAILQ_HEAD(virtio_ha_global_dma_tbl, virtio_ha_global_dma_entry);
+
+struct virtio_ha_global_mem_info {
+	size_t sz;
+	int flags;
+	uint64_t off;
+};
 
 struct vdpa_vf_with_devargs {
     struct virtio_dev_name vf_name;
@@ -122,6 +129,9 @@ struct virtio_ha_device_list {
 	struct virtio_ha_global_dma_tbl dma_tbl;
 	uint32_t nr_pf;
 	int global_cfd;
+	int mem_fd;
+	struct virtio_ha_global_mem_info mem_info;
+	void *mem_va;
 };
 
 struct virtio_ha_dev_ctx_cb {
@@ -240,5 +250,8 @@ int virtio_ha_global_dma_map_store(struct virtio_ha_global_dma_map *map);
 
 /* */
 int virtio_ha_global_dma_map_remove(struct virtio_ha_global_dma_map *map);
+
+/* */
+int virtio_ha_global_mem_fd_store(struct virtio_ha_global_mem_info *info, int fd);
 
 #endif /* _VIRTIO_HA_H_ */

@@ -712,6 +712,11 @@ int
 rte_mem_alloc_validator_register(const char *name,
 		rte_mem_alloc_validator_t clb, int socket_id, size_t limit);
 
+typedef void (*mfd_cb)(size_t sz, int flags, int fd, uint64_t off);
+
+void
+rte_mem_register_fd_cb(mfd_cb cb);
+
 /**
  * @brief Unregister validator callback for memory allocations.
  *

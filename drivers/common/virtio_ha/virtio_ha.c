@@ -1270,6 +1270,48 @@ virtio_ha_global_dma_map_remove(struct virtio_ha_global_dma_map *map)
 	return virtio_ha_global_dma_map_no_cache(map, false);
 }
 
+static int
+virtio_ha_global_mem_fd_store_no_cache(struct virtio_ha_global_mem_info *info, int fd)
+{
+	struct virtio_ha_msg *msg;
+	int ret;
+
+	msg = virtio_ha_alloc_msg();
+	if (!msg) {
+		HA_IPC_LOG(ERR, "Failed to alloc ipc client msg");
+		return -1;
+	}
+
+	msg->hdr.type = VIRTIO_HA_GLOBAL_STORE_MEM_FD;
+	msg->hdr.size = sizeof(struct virtio_ha_global_mem_info);
+	msg->iov.iov_len = sizeof(struct virtio_ha_global_mem_info);
+	msg->iov.iov_base = (void *)info;
+	msg->nr_fds = 1;
+	msg->fds[0] = fd;
+	ret = virtio_ha_send_msg(ipc_client_sock, msg);
+	if (ret < 0) {
+		HA_IPC_LOG(ERR, "Failed to send msg");
+		return -1;
+	}
+
+	virtio_ha_free_msg(msg);
+
+	return 0;
+}
+
+int
+virtio_ha_global_mem_fd_store(struct virtio_ha_global_mem_info *info, int fd)
+{
+	while (__atomic_load_n(&ipc_client_sync, __ATOMIC_RELAXED))
+		;
+
+	if (!__atomic_load_n(&ipc_client_connected, __ATOMIC_RELAXED)) {
+		;/**/
+	}
+
+	return virtio_ha_global_mem_fd_store_no_cache(info, fd);
+}
+
 static void
 sync_dev_context_to_ha(void)
 {

@@ -1011,6 +1011,12 @@ rte_extmem_detach(void *va_addr, size_t len)
 	return sync_memory(va_addr, len, false);
 }
 
+void
+rte_mem_register_fd_cb(mfd_cb cb)
+{
+	eal_memalloc_register_fd_cb(cb);
+}
+
 /* detach all EAL memory */
 int
 rte_eal_memory_detach(void)

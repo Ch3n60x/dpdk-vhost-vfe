@@ -8,6 +8,7 @@
 #include <sys/epoll.h>
 #include <sys/queue.h>
 #include <sys/ioctl.h>
+#include <sys/mman.h>
 #include <linux/vfio.h>
 #include <unistd.h>
 #include <syslog.h>
@@ -570,6 +571,15 @@ ha_server_cleanup_global_dma(void)
 	struct vfio_iommu_type1_dma_unmap dma_unmap = {};
 	int ret;
 
+	dma_unmap.argsz = sizeof(struct vfio_iommu_type1_dma_unmap);
+	dma_unmap.flags = VFIO_DMA_UNMAP_FLAG_ALL;
+	dma_unmap.size = 0;
+	dma_unmap.iova = 0;
+	ret = ioctl(hs.global_cfd, VFIO_IOMMU_UNMAP_DMA, &dma_unmap);
+	if (ret) {
+		printf("Cannot clear DMA remapping");
+	}
+#if 0
 	for (entry = TAILQ_FIRST(&hs.dma_tbl);
 		 entry != NULL; entry = next) {
 		next = TAILQ_NEXT(entry, next);
@@ -588,6 +598,31 @@ ha_server_cleanup_global_dma(void)
 		TAILQ_REMOVE(&hs.dma_tbl, entry, next);
 		free(entry);
 	}
+#endif
+}
+
+static int
+ha_server_global_store_mem_fd(struct virtio_ha_msg *msg)
+{
+	struct virtio_ha_global_mem_info *info;
+	void *addr = (void *)(uintptr_t)0x140000000;
+
+	if (msg->nr_fds != 1)
+		return HA_MSG_HDLR_SUCCESS;
+
+	hs.mem_fd = msg->fds[0];
+	printf("Save global mem fd: %d\n", hs.mem_fd);
+	info = (struct virtio_ha_global_mem_info *)msg->iov.iov_base;
+	memcpy(&hs.mem_info, info, sizeof(struct virtio_ha_global_mem_info));
+
+	hs.mem_va = mmap(addr, info->sz, PROT_READ | PROT_WRITE, info->flags, hs.mem_fd,
+			info->off);
+
+	if (hs.mem_va == MAP_FAILED) {
+		printf("mmap failed\n");
+	}
+	printf("try to map 0x140000000, finally at %p\n", hs.mem_va);
+	return HA_MSG_HDLR_SUCCESS;
 }
 
 static ha_message_handler_t ha_message_handlers[VIRTIO_HA_MESSAGE_MAX] = {//TO-DO: add payload sz check and more log in handler
@@ -607,6 +642,7 @@ static ha_message_handler_t ha_message_handlers[VIRTIO_HA_MESSAGE_MAX] = {//TO-D
 	[VIRTIO_HA_GLOBAL_QUERY_CONTAINER] = ha_server_query_global_cfd,
 	[VIRTIO_HA_GLOBAL_STORE_DMA_MAP] = ha_server_global_store_dma_map,
 	[VIRTIO_HA_GLOBAL_REMOVE_DMA_MAP] = ha_server_global_remove_dma_map,
+	[VIRTIO_HA_GLOBAL_STORE_MEM_FD] = ha_server_global_store_mem_fd,
 };
 
 static void
@@ -738,6 +774,7 @@ main(__attribute__((__unused__)) int argc, __attribute__((__unused__)) char *arg
 					log_error("Failed to epoll ctl del for fd %d", handler->sock);
 				close(handler->sock);
 				ha_server_cleanup_global_dma();
+				munmap(hs.mem_va, hs.mem_info.sz);
 			} else { /* EPOLLIN */
 				handler->cb(handler->sock, handler->data);
 			}
