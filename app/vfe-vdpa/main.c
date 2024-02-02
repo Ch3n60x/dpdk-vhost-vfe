@@ -9,7 +9,7 @@
 #include <unistd.h>
 #include <sys/eventfd.h>
 #include <uuid/uuid.h>
-
+#include <sys/time.h>
 #include <rte_ethdev.h>
 #include <rte_malloc.h>
 #include <rte_vhost.h>
@@ -793,6 +793,7 @@ virtio_ha_client_dev_restore(void)
 	struct vdpa_vf_ctx *vf_ctx = NULL;
 	struct virtio_pf_ctx pf_ctx;
 	int ret, i, j, nr_pf, nr_vf;
+	struct timeval start;
 
 	ret = virtio_ha_pf_list_query(&pf_list);
 	if (ret < 0) {
@@ -851,6 +852,10 @@ virtio_ha_client_dev_restore(void)
 		nr_vf = ret;
 
 		for (j = 0; j < nr_vf && ret != -1; j++) {
+			gettimeofday(&start, NULL);
+			printf("System time before query ctx (dev %s): %lu.%lu\n", vf_list[j].vf_name.dev_bdf,
+				start.tv_sec, start.tv_usec);
+
 			ret = virtio_ha_vf_ctx_query(&vf_list[j].vf_name, pf_list + i, &vf_ctx);
 			if (ret < 0) {
 				RTE_LOG(ERR, VDPA, "Failed to query vf ctx\n");

@@ -12,7 +12,7 @@
 #include <vdpa_driver.h>
 #include <rte_kvargs.h>
 #include <rte_uuid.h>
-
+#include <sys/time.h>
 #include <virtio_api.h>
 #include <virtio_lm.h>
 #include <virtio_util.h>
@@ -1367,6 +1367,10 @@ virtio_vdpa_dev_config(int vid)
 	uint64_t t_start = rte_rdtsc_precise();
 	uint64_t t_end;
 	int ret, i, vhost_sock_fd;
+	struct timeval start;
+
+	gettimeofday(&start, NULL);
+	printf("System time when config start (dev %s): %lu.%06lu\n", priv->vf_name.dev_bdf, start.tv_sec, start.tv_usec);
 
 	if (priv == NULL) {
 		DRV_LOG(ERR, "Invalid vDPA device: %s", vdev->device->name);
@@ -1521,6 +1525,8 @@ virtio_vdpa_dev_config(int vid)
 			virtio_vdpa_dev_store_mem_tbl(priv);
 	}
 
+	gettimeofday(&start, NULL);
+	printf("System time when config done (dev %s): %lu.%06lu\n", priv->vf_name.dev_bdf, start.tv_sec, start.tv_usec);
 	return 0;
 }
 
@@ -2030,8 +2036,12 @@ virtio_vdpa_dev_probe(struct rte_pci_driver *pci_drv __rte_unused,
 	size_t mz_len;
 	int retries = VIRTIO_VDPA_GET_GROUPE_RETRIES;
 	bool restore = false;
+	struct timeval start;
 
 	rte_pci_device_name(&pci_dev->addr, devname, RTE_DEV_NAME_MAX_LEN);
+
+	gettimeofday(&start, NULL);
+	printf("System time when probe (dev %s): %lu.%06lu\n", devname, start.tv_sec, start.tv_usec);
 
 	ret = virtio_pci_devargs_parse(pci_dev->device.devargs, &vdpa, vm_uuid);
 	if (ret < 0) {

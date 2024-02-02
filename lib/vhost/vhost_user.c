@@ -26,6 +26,7 @@
 #include <unistd.h>
 #include <fcntl.h>
 #include <sys/ioctl.h>
+#include <sys/time.h>
 #include <sys/mman.h>
 #include <sys/stat.h>
 #include <sys/syscall.h>
@@ -2842,6 +2843,15 @@ vhost_user_msg_handler(int vid, int fd)
 	bool handled;
 	int request;
 	uint32_t i;
+
+    struct timeval start;
+	static bool print[4] = {true, true, true, true};
+
+	gettimeofday(&start, NULL);
+	if (print[vid]) {
+		printf("System time when first msg received (vid %d): %lu.%06lu\n", vid, start.tv_sec, start.tv_usec);
+		print[vid] = false;
+	}
 
 	dev = get_device(vid);
 	if (dev == NULL)
